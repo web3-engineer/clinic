@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { Toaster } from "sonner";
 import "./globals.css";
 
 // 1. Restauramos a fonte Geist original para não quebrar seu Tailwind!
@@ -55,6 +56,7 @@ export default function RootLayout({
         <div className="flex-grow flex flex-col items-center">
           {children}
         </div>
+        <Toaster richColors position="top-right" />
 
       </body>
     </html>

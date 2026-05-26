@@ -1,359 +1,254 @@
 "use client";
 
-import { useState, useEffect, Suspense } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { ChevronLeft, ChevronRight, Clock, User, Phone, CheckCircle2, X } from "lucide-react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { Plus, X, User, Clock, Calendar, ChevronRight, MessageCircle } from "lucide-react";
+import { format } from "date-fns";
+import { ptBR } from "date-fns/locale";
+import { toast } from "sonner";
+import dynamic from "next/dynamic";
 
-// Mock API para facilitar futura integração com backend real
-const mockApi = {
-  createAppointment: async (data: any) => {
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        resolve({
-          ...data,
-          status: "confirmed", // or pending based on logic
-        });
-      }, 600); // Simulando delay de rede
-    });
-  },
+const FullCalendarWrapper = dynamic(
+  () => import("@/components/crm/FullCalendarWrapper"),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex items-center justify-center min-h-[600px]">
+        <div className="w-8 h-8 rounded-full border-2 border-black/20 dark:border-white/20 border-t-black dark:border-t-white animate-spin" />
+      </div>
+    ),
+  }
+);
+
+type Doctor = { id: string; name: string; color: string };
+type Patient = { id: string; name: string; phone: string };
+type Appointment = {
+  id: string; patientId: string; patient: Patient;
+  doctorId: string | null; doctor: Doctor | null;
+  date: string; duration: number; type: string; status: string; notes: string | null;
 };
 
-const TIME_SLOTS = [
-  "08:00", "08:30", "09:00", "09:30",
-  "10:00", "10:30", "11:00", "11:30",
-  "13:00", "13:30", "14:00", "14:30",
-  "15:00", "15:30", "16:00", "16:30"
+const SERVICE_TYPES = [
+  "Consulta Geral", "Exame de Retina", "Cirurgia Refrativa",
+  "Cirurgia de Catarata", "Mapeamento", "Lentes de Contato", "Pré-operatório", "Pós-operatório",
 ];
 
-// Dicionário de agendamentos onde a chave é o dia do mês
-const INITIAL_APPOINTMENTS: Record<number, Record<string, { name: string; phone: string; status: "confirmed" | "pending"; service: string }>> = {
-  8: {
-    "09:00": { name: "Helena Cardoso", phone: "(11) 99999-8888", status: "confirmed", service: "Consulta Geral" },
-    "10:30": { name: "Marcos Silva", phone: "(11) 97777-6666", status: "pending", service: "Cirurgia Refrativa" },
-    "14:00": { name: "Sofia Martins", phone: "(11) 95555-4444", status: "confirmed", service: "Exame de Retina" },
-  },
+const STATUS_COLORS: Record<string, string> = {
+  PENDING: "#F59E0B", CONFIRMED: "#10B981", ATTENDED: "#3B82F6",
+  NO_SHOW: "#EF4444", CANCELLED: "#6B7280",
 };
 
-function SchedulingContent() {
-  const searchParams = useSearchParams();
-  const router = useRouter();
-  const newLead = searchParams.get("newLead");
+const FALLBACK_DOCTORS: Doctor[] = [
+  { id: "doc-1", name: "Dr. Rafael Melo", color: "#3B82F6" },
+  { id: "doc-2", name: "Dra. Fernanda Costa", color: "#8B5CF6" },
+];
 
-  const [selectedDay, setSelectedDay] = useState(8);
-  const [appointmentsByDay, setAppointmentsByDay] = useState(INITIAL_APPOINTMENTS);
-  
-  // Modal states
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [selectedTime, setSelectedTime] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [newApptData, setNewApptData] = useState({ name: "", phone: "", service: "Consulta Geral" });
+export default function SchedulingPage() {
+  const [appointments, setAppointments] = useState<Appointment[]>([]);
+  const [doctors, setDoctors] = useState<Doctor[]>(FALLBACK_DOCTORS);
+  const [patients, setPatients] = useState<Patient[]>([]);
+  const [selectedEvent, setSelectedEvent] = useState<Appointment | null>(null);
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [selectedSlot, setSelectedSlot] = useState<Date | null>(null);
+  const [form, setForm] = useState({ patientId: "", doctorId: "", type: "Consulta Geral", duration: 30, notes: "" });
+  const [isSaving, setIsSaving] = useState(false);
+  const [dateRange, setDateRange] = useState<{ start: Date; end: Date }>({
+    start: new Date(Date.now() - 7 * 864e5),
+    end: new Date(Date.now() + 14 * 864e5),
+  });
+
+  const fetchAppointments = useCallback(async () => {
+    const { start, end } = dateRange;
+    const res = await fetch(`/api/appointments?start=${start.toISOString()}&end=${end.toISOString()}`);
+    const data = await res.json();
+    setAppointments(data);
+  }, [dateRange]);
 
   useEffect(() => {
-    if (newLead) {
-      setNewApptData((prev) => ({ ...prev, name: newLead }));
-    }
-  }, [newLead]);
+    fetch("/api/patients").then((r) => r.json()).then(setPatients);
+  }, []);
 
-  const handleOpenModal = (time: string) => {
-    setSelectedTime(time);
-    setIsModalOpen(true);
+  useEffect(() => {
+    fetchAppointments();
+  }, [fetchAppointments]);
+
+  const calendarEvents = appointments.map((a) => ({
+    id: a.id,
+    title: `${a.patient.name} · ${a.type}`,
+    start: a.date,
+    end: new Date(new Date(a.date).getTime() + a.duration * 60000).toISOString(),
+    backgroundColor: a.doctor?.color ?? STATUS_COLORS[a.status] ?? "#3B82F6",
+    borderColor: "transparent",
+    extendedProps: a,
+  }));
+
+  const handleEventDrop = async (info: { event: { id: string; start: Date | null } }) => {
+    if (!info.event.start) return;
+    await fetch(`/api/appointments/${info.event.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ date: info.event.start.toISOString() }),
+    });
+    toast.success("Consulta reagendada!");
+    fetchAppointments();
   };
 
-  const handleBook = async (e: React.FormEvent) => {
+  const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newApptData.name || !newApptData.phone) return;
-    
-    setIsSubmitting(true);
+    if (!form.patientId || !selectedSlot) return;
+    setIsSaving(true);
     try {
-      await mockApi.createAppointment({
-        ...newApptData,
-        day: selectedDay,
-        time: selectedTime,
+      await fetch("/api/appointments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...form, date: selectedSlot.toISOString(), doctorId: form.doctorId || null }),
       });
-
-      setAppointmentsByDay((prev) => ({
-        ...prev,
-        [selectedDay]: {
-          ...(prev[selectedDay] || {}),
-          [selectedTime]: {
-            name: newApptData.name,
-            phone: newApptData.phone,
-            service: newApptData.service,
-            status: "confirmed",
-          },
-        },
-      }));
-
-      // Limpa URL se existia newLead
-      if (newLead) {
-        router.replace("/crm/scheduling");
-      }
-
-      setNewApptData({ name: "", phone: "", service: "Consulta Geral" });
-      setIsModalOpen(false);
-    } catch (error) {
-      console.error(error);
+      toast.success("Consulta agendada!");
+      setIsCreateOpen(false);
+      setForm({ patientId: "", doctorId: "", type: "Consulta Geral", duration: 30, notes: "" });
+      fetchAppointments();
+    } catch {
+      toast.error("Erro ao agendar");
     } finally {
-      setIsSubmitting(false);
+      setIsSaving(false);
     }
   };
 
-  const currentDayAppointments = appointmentsByDay[selectedDay] || {};
+  const handleStatusUpdate = async (id: string, status: string) => {
+    await fetch(`/api/appointments/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status }),
+    });
+    toast.success("Status atualizado!");
+    setSelectedEvent(null);
+    fetchAppointments();
+  };
 
   return (
-    <div className="flex flex-col gap-8 h-full relative">
-      <motion.div
-        initial={{ opacity: 0, y: -20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5 }}
-        className="flex flex-col gap-4"
-      >
+    <div className="flex flex-col gap-6 h-full">
+      <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h1 className="text-3xl md:text-4xl font-bold tracking-tight text-black dark:text-white">
-            Painel de Agendamentos
-          </h1>
-          <p className="text-black/60 dark:text-white/60">
-            Calendário rápido para marcar e gerenciar as consultas do dia.
-          </p>
+          <h1 className="text-3xl md:text-4xl font-bold tracking-tight text-black dark:text-white">Agendamentos</h1>
+          <p className="text-black/60 dark:text-white/60">Clique em um horário para agendar · Arraste para reagendar</p>
         </div>
-
-        {newLead && (
-          <motion.div 
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            className="flex items-center gap-3 bg-green-500/10 text-green-600 dark:text-green-400 p-4 rounded-2xl border border-green-500/20"
-          >
-            <CheckCircle2 className="h-5 w-5" />
-            <p className="text-sm font-medium">
-              Lead <strong>{newLead}</strong> convertido com sucesso e encaminhado para agendamento! Escolha um horário abaixo.
-            </p>
-          </motion.div>
-        )}
-      </motion.div>
-
-      <div className="flex flex-col lg:flex-row gap-8 flex-1">
-        {/* Calendar / Date Picker (Left Sidebar) */}
-        <motion.div
-          initial={{ opacity: 0, x: -20 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ duration: 0.5, delay: 0.1 }}
-          className="lg:w-80 rounded-3xl border border-black/5 dark:border-white/5 bg-white/50 dark:bg-[#0a0a0a]/50 p-6 backdrop-blur-xl h-fit"
-        >
-          <div className="flex items-center justify-between mb-6">
-            <h2 className="font-bold text-lg text-black dark:text-white">Maio 2026</h2>
-            <div className="flex gap-2">
-              <button className="p-1.5 rounded-full hover:bg-black/5 dark:hover:bg-white/10 text-black dark:text-white transition-colors">
-                <ChevronLeft className="h-5 w-5" />
-              </button>
-              <button className="p-1.5 rounded-full hover:bg-black/5 dark:hover:bg-white/10 text-black dark:text-white transition-colors">
-                <ChevronRight className="h-5 w-5" />
-              </button>
-            </div>
-          </div>
-          
-          {/* Simple Mocked Calendar Grid */}
-          <div className="grid grid-cols-7 gap-1 text-center mb-2">
-            {["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"].map(day => (
-              <div key={day} className="text-xs font-medium text-black/40 dark:text-white/40 py-2">
-                {day}
+        <div className="flex items-center gap-3">
+          <div className="hidden md:flex gap-2">
+            {doctors.map((d) => (
+              <div key={d.id} className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/50 dark:bg-[#0a0a0a]/50 border border-black/5 dark:border-white/5 text-xs font-medium text-black dark:text-white">
+                <div className="w-2 h-2 rounded-full" style={{ backgroundColor: d.color }} />
+                {d.name.split(" ").slice(0, 2).join(" ")}
               </div>
             ))}
           </div>
-          <div className="grid grid-cols-7 gap-1">
-            {Array.from({ length: 31 }).map((_, i) => {
-              const day = i + 1;
-              const isSelected = day === selectedDay;
-              // Check if this day has any appointments in our state
-              const hasAppt = appointmentsByDay[day] && Object.keys(appointmentsByDay[day]).length > 0;
-              
-              return (
-                <button
-                  key={day}
-                  onClick={() => setSelectedDay(day)}
-                  className={`
-                    aspect-square rounded-full flex items-center justify-center text-sm font-medium relative transition-all
-                    ${isSelected 
-                      ? "bg-black text-white dark:bg-white dark:text-black shadow-md" 
-                      : "text-black hover:bg-black/5 dark:text-white dark:hover:bg-white/10"
-                    }
-                  `}
-                >
-                  {day}
-                  {hasAppt && !isSelected && (
-                    <span className="absolute bottom-1 w-1 h-1 rounded-full bg-blue-500" />
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </motion.div>
+          <button onClick={() => { setSelectedSlot(new Date()); setIsCreateOpen(true); }} className="flex items-center gap-2 bg-black dark:bg-white text-white dark:text-black px-5 py-2.5 rounded-full text-sm font-bold transition-transform hover:scale-105 active:scale-95">
+            <Plus className="h-4 w-4" />Nova Consulta
+          </button>
+        </div>
+      </motion.div>
 
-        {/* Time Slots (Right Main Area) */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5, delay: 0.2 }}
-          className="flex-1 rounded-3xl border border-black/5 dark:border-white/5 bg-white/50 dark:bg-[#0a0a0a]/50 p-6 backdrop-blur-xl flex flex-col"
-        >
-          <div className="flex items-center justify-between mb-6">
-            <h2 className="font-bold text-xl text-black dark:text-white">
-              {/* Fake day calculation for demo purposes */}
-              {["Domingo", "Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado"][(selectedDay + 4) % 7]}, {selectedDay} de Maio
-            </h2>
-            <div className="flex gap-2">
-              <span className="flex items-center gap-2 text-sm text-black/60 dark:text-white/60 bg-black/5 dark:bg-white/5 px-3 py-1.5 rounded-full">
-                <div className="w-2 h-2 rounded-full bg-green-500" /> Confirmado
-              </span>
-              <span className="flex items-center gap-2 text-sm text-black/60 dark:text-white/60 bg-black/5 dark:bg-white/5 px-3 py-1.5 rounded-full">
-                <div className="w-2 h-2 rounded-full bg-yellow-500" /> Pendente
-              </span>
-            </div>
-          </div>
-
-          <div className="flex-1 overflow-y-auto pr-2 flex flex-col gap-3">
-            {TIME_SLOTS.map((time) => {
-              const appt = currentDayAppointments[time];
-              
-              return (
-                <div 
-                  key={time} 
-                  className="group flex flex-col sm:flex-row sm:items-center gap-4 p-4 rounded-2xl border border-black/5 dark:border-white/5 bg-white dark:bg-[#111] hover:shadow-md transition-all relative overflow-hidden"
-                >
-                  {/* Status Indicator Bar */}
-                  {appt && (
-                    <div className={`absolute left-0 top-0 bottom-0 w-1.5 ${appt.status === 'confirmed' ? 'bg-green-500' : 'bg-yellow-500'}`} />
-                  )}
-
-                  <div className="w-24 flex items-center gap-2 text-black/60 dark:text-white/60 font-medium">
-                    <Clock className="h-4 w-4" />
-                    {time}
-                  </div>
-
-                  <div className="flex-1 flex items-center">
-                    {appt ? (
-                      <div className="flex flex-col sm:flex-row sm:items-center justify-between w-full gap-4">
-                        <div className="flex flex-col gap-1">
-                          <span className="font-bold text-black dark:text-white flex items-center gap-2">
-                            <User className="h-4 w-4 text-black/40 dark:text-white/40" />
-                            {appt.name}
-                          </span>
-                          <span className="text-sm text-black/60 dark:text-white/60 flex items-center gap-2">
-                            <Phone className="h-3 w-3" />
-                            {appt.phone}
-                            <span className="mx-2 opacity-50">•</span>
-                            {appt.service}
-                          </span>
-                        </div>
-                        <div className="flex gap-2">
-                          {appt.status === 'pending' && (
-                            <button className="px-4 py-2 bg-green-500/10 text-green-600 dark:text-green-400 hover:bg-green-500/20 rounded-xl text-sm font-bold transition-colors">
-                              Confirmar
-                            </button>
-                          )}
-                          <button className="px-4 py-2 bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 text-black dark:text-white rounded-xl text-sm font-bold transition-colors">
-                            Editar
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <button 
-                        onClick={() => handleOpenModal(time)}
-                        className="w-full h-full py-3 border-2 border-dashed border-black/10 dark:border-white/10 rounded-xl text-black/40 dark:text-white/40 hover:text-black hover:border-black/30 dark:hover:text-white dark:hover:border-white/30 transition-all font-medium flex items-center justify-center gap-2"
-                      >
-                        + Agendar Rápido
-                      </button>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </motion.div>
+      <div className="flex-1 rounded-3xl border border-black/5 dark:border-white/5 bg-white/50 dark:bg-[#0a0a0a]/50 backdrop-blur-xl p-2 md:p-4 min-h-[600px]">
+        <FullCalendarWrapper
+          events={calendarEvents}
+          onEventDrop={handleEventDrop}
+          onEventClick={(info) => setSelectedEvent(info.event.extendedProps as Appointment)}
+          onDateSelect={(info) => { setSelectedSlot(info.start); setIsCreateOpen(true); }}
+          onDatesSet={(range) => setDateRange({ start: range.start, end: range.end })}
+        />
       </div>
 
-      {/* Booking Modal */}
+      {/* Event SlideOver */}
       <AnimatePresence>
-        {isModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setIsModalOpen(false)}
-              className="absolute inset-0 bg-black/40 backdrop-blur-sm"
-            />
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="relative w-full max-w-md bg-white dark:bg-[#0a0a0a] rounded-3xl shadow-2xl p-6 border border-black/5 dark:border-white/5"
-            >
+        {selectedEvent && (
+          <>
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setSelectedEvent(null)} className="fixed inset-0 z-40 bg-black/30 backdrop-blur-sm" />
+            <motion.div initial={{ x: "100%" }} animate={{ x: 0 }} exit={{ x: "100%" }} transition={{ type: "spring", damping: 25, stiffness: 200 }} className="fixed right-0 top-0 bottom-0 z-50 w-80 bg-white dark:bg-[#0a0a0a] border-l border-black/5 dark:border-white/5 p-6 overflow-y-auto shadow-2xl">
               <div className="flex items-center justify-between mb-6">
-                <h2 className="text-xl font-bold text-black dark:text-white">Agendar Consulta</h2>
-                <button 
-                  onClick={() => setIsModalOpen(false)}
-                  className="p-2 rounded-full hover:bg-black/5 dark:hover:bg-white/10 text-black/60 dark:text-white/60"
-                >
-                  <X className="h-5 w-5" />
-                </button>
+                <h3 className="font-bold text-lg text-black dark:text-white">Detalhes</h3>
+                <button onClick={() => setSelectedEvent(null)} className="p-2 rounded-full hover:bg-black/5 dark:hover:bg-white/10"><X className="h-4 w-4 text-black/60 dark:text-white/60" /></button>
               </div>
-
-              <div className="mb-6 p-4 rounded-xl bg-black/5 dark:bg-white/5 flex items-center justify-between">
-                <div>
-                  <p className="text-xs text-black/60 dark:text-white/60 font-medium">Data selecionada</p>
-                  <p className="text-sm font-bold text-black dark:text-white">{selectedDay} de Maio de 2026</p>
+              <div className="space-y-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-blue-400 to-blue-600 flex items-center justify-center text-white font-bold">{selectedEvent.patient.name.charAt(0)}</div>
+                  <div>
+                    <p className="font-bold text-black dark:text-white">{selectedEvent.patient.name}</p>
+                    <p className="text-xs text-black/50 dark:text-white/50">{selectedEvent.patient.phone}</p>
+                  </div>
                 </div>
-                <div className="text-right">
-                  <p className="text-xs text-black/60 dark:text-white/60 font-medium">Horário</p>
-                  <p className="text-sm font-bold text-black dark:text-white">{selectedTime}</p>
+                <div className="space-y-2 text-sm">
+                  <p className="flex items-center gap-2 text-black/60 dark:text-white/60"><Calendar className="h-4 w-4" />{format(new Date(selectedEvent.date), "dd/MM/yyyy 'às' HH:mm", { locale: ptBR })}</p>
+                  <p className="flex items-center gap-2 text-black/60 dark:text-white/60"><Clock className="h-4 w-4" />{selectedEvent.duration} min · {selectedEvent.type}</p>
+                  {selectedEvent.doctor && <p className="flex items-center gap-2 text-black/60 dark:text-white/60"><User className="h-4 w-4" />{selectedEvent.doctor.name}</p>}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {["CONFIRMED", "ATTENDED", "NO_SHOW", "CANCELLED"].map((s) => (
+                    <button key={s} onClick={() => handleStatusUpdate(selectedEvent.id, s)} className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${selectedEvent.status === s ? "bg-black text-white dark:bg-white dark:text-black" : "bg-black/5 dark:bg-white/10 text-black dark:text-white hover:bg-black/10"}`}>
+                      {s === "CONFIRMED" ? "Confirmar" : s === "ATTENDED" ? "Atendido" : s === "NO_SHOW" ? "Faltou" : "Cancelar"}
+                    </button>
+                  ))}
+                </div>
+                <div className="pt-4 border-t border-black/5 dark:border-white/5 space-y-2">
+                  <a href={`/crm/patients/${selectedEvent.patientId}`} className="flex items-center justify-between w-full px-4 py-3 rounded-xl bg-black/5 dark:bg-white/10 text-sm font-medium text-black dark:text-white hover:bg-black/10 dark:hover:bg-white/15 transition-all">
+                    <span className="flex items-center gap-2"><User className="h-4 w-4" />Ver Prontuário</span>
+                    <ChevronRight className="h-4 w-4 opacity-50" />
+                  </a>
+                  <a href={`/crm/whatsapp?patientId=${selectedEvent.patientId}`} className="flex items-center justify-between w-full px-4 py-3 rounded-xl bg-green-500/10 text-sm font-medium text-green-700 dark:text-green-400 hover:bg-green-500/20 transition-all">
+                    <span className="flex items-center gap-2"><MessageCircle className="h-4 w-4" />WhatsApp</span>
+                    <ChevronRight className="h-4 w-4 opacity-50" />
+                  </a>
                 </div>
               </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
 
-              <form onSubmit={handleBook} className="flex flex-col gap-4">
+      {/* Create Modal */}
+      <AnimatePresence>
+        {isCreateOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setIsCreateOpen(false)} className="absolute inset-0 bg-black/40 backdrop-blur-sm" />
+            <motion.div initial={{ opacity: 0, scale: 0.95, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, y: 20 }} className="relative w-full max-w-md bg-white dark:bg-[#0a0a0a] rounded-3xl shadow-2xl p-6 border border-black/5 dark:border-white/5">
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-xl font-bold text-black dark:text-white">Nova Consulta</h2>
+                <button onClick={() => setIsCreateOpen(false)} className="p-2 rounded-full hover:bg-black/5 dark:hover:bg-white/10 text-black/60 dark:text-white/60"><X className="h-5 w-5" /></button>
+              </div>
+              {selectedSlot && (
+                <p className="text-sm text-black/60 dark:text-white/60 mb-4 flex items-center gap-2">
+                  <Calendar className="h-4 w-4" />{format(selectedSlot, "dd/MM/yyyy 'às' HH:mm", { locale: ptBR })}
+                </p>
+              )}
+              <form onSubmit={handleCreate} className="flex flex-col gap-4">
                 <div className="flex flex-col gap-1.5">
-                  <label className="text-sm font-medium text-black/60 dark:text-white/60">Nome Completo</label>
-                  <input 
-                    type="text" 
-                    required
-                    value={newApptData.name}
-                    onChange={(e) => setNewApptData({...newApptData, name: e.target.value})}
-                    placeholder="Ex: Carlos Mendes"
-                    className="w-full px-4 py-3 rounded-xl bg-black/5 dark:bg-white/5 border border-transparent focus:border-black/20 dark:focus:border-white/20 outline-none text-black dark:text-white"
-                  />
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  <label className="text-sm font-medium text-black/60 dark:text-white/60">WhatsApp</label>
-                  <input 
-                    type="tel" 
-                    required
-                    value={newApptData.phone}
-                    onChange={(e) => setNewApptData({...newApptData, phone: e.target.value})}
-                    placeholder="(11) 90000-0000"
-                    className="w-full px-4 py-3 rounded-xl bg-black/5 dark:bg-white/5 border border-transparent focus:border-black/20 dark:focus:border-white/20 outline-none text-black dark:text-white"
-                  />
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  <label className="text-sm font-medium text-black/60 dark:text-white/60">Tipo de Consulta</label>
-                  <select 
-                    value={newApptData.service}
-                    onChange={(e) => setNewApptData({...newApptData, service: e.target.value})}
-                    className="w-full px-4 py-3 rounded-xl bg-black/5 dark:bg-white/5 border border-transparent focus:border-black/20 dark:focus:border-white/20 outline-none text-black dark:text-white"
-                  >
-                    <option value="Consulta Geral">Consulta Geral</option>
-                    <option value="Exame de Retina">Exame de Retina</option>
-                    <option value="Cirurgia Refrativa">Cirurgia Refrativa</option>
-                    <option value="Cirurgia de Catarata">Cirurgia de Catarata</option>
-                    <option value="Retorno">Retorno</option>
+                  <label className="text-sm font-medium text-black/60 dark:text-white/60">Paciente *</label>
+                  <select value={form.patientId} onChange={(e) => setForm({ ...form, patientId: e.target.value })} required className="w-full px-4 py-3 rounded-xl bg-black/5 dark:bg-white/5 border border-transparent focus:border-black/20 dark:focus:border-white/20 outline-none text-black dark:text-white text-sm">
+                    <option value="">Selecione...</option>
+                    {patients.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                   </select>
                 </div>
-                
-                <button 
-                  type="submit"
-                  disabled={isSubmitting}
-                  className="mt-4 w-full py-3.5 rounded-xl bg-black text-white dark:bg-white dark:text-black font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.02] shadow-md"
-                >
-                  {isSubmitting ? "Confirmando..." : "Confirmar Agendamento"}
+                <div className="flex gap-3">
+                  <div className="flex-1 flex flex-col gap-1.5">
+                    <label className="text-sm font-medium text-black/60 dark:text-white/60">Médico</label>
+                    <select value={form.doctorId} onChange={(e) => setForm({ ...form, doctorId: e.target.value })} className="w-full px-3 py-3 rounded-xl bg-black/5 dark:bg-white/5 border border-transparent outline-none text-black dark:text-white text-sm">
+                      <option value="">Qualquer</option>
+                      {doctors.map((d) => <option key={d.id} value={d.id}>{d.name.split(" ").slice(0, 2).join(" ")}</option>)}
+                    </select>
+                  </div>
+                  <div className="flex-1 flex flex-col gap-1.5">
+                    <label className="text-sm font-medium text-black/60 dark:text-white/60">Duração</label>
+                    <select value={form.duration} onChange={(e) => setForm({ ...form, duration: parseInt(e.target.value) })} className="w-full px-3 py-3 rounded-xl bg-black/5 dark:bg-white/5 border border-transparent outline-none text-black dark:text-white text-sm">
+                      {[15, 30, 45, 60, 90].map((d) => <option key={d} value={d}>{d} min</option>)}
+                    </select>
+                  </div>
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-sm font-medium text-black/60 dark:text-white/60">Tipo</label>
+                  <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })} className="w-full px-4 py-3 rounded-xl bg-black/5 dark:bg-white/5 border border-transparent outline-none text-black dark:text-white text-sm">
+                    {SERVICE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                </div>
+                <button type="submit" disabled={isSaving} className="mt-2 w-full py-3.5 rounded-xl bg-black dark:bg-white text-white dark:text-black font-bold hover:opacity-90 disabled:opacity-50 transition-all">
+                  {isSaving ? "Agendando..." : "Confirmar Agendamento"}
                 </button>
               </form>
             </motion.div>
@@ -361,13 +256,5 @@ function SchedulingContent() {
         )}
       </AnimatePresence>
     </div>
-  );
-}
-
-export default function CRMScheduling() {
-  return (
-    <Suspense fallback={<div className="p-8">Carregando painel...</div>}>
-      <SchedulingContent />
-    </Suspense>
   );
 }
