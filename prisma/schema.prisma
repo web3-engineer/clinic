@@ -1,0 +1,96 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Patient {
+  id             String    @id @default(cuid())
+  name           String
+  phone          String
+  email          String?
+  cpf            String?   @unique
+  birthDate      DateTime?
+  address        String?
+  healthPlan     String?
+  observations   String?
+  pipelineStatus String    @default("new")
+  stageEnteredAt DateTime  @default(now())
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  appointments Appointment[]
+  messages     WhatsAppMessage[]
+  financials   FinancialRecord[]
+}
+
+model Appointment {
+  id            String   @id @default(cuid())
+  patientId     String
+  patient       Patient  @relation(fields: [patientId], references: [id])
+  doctorId      String?
+  doctor        Doctor?  @relation(fields: [doctorId], references: [id])
+  date          DateTime
+  duration      Int      @default(30)
+  type          String
+  status        String   @default("PENDING")
+  notes         String?
+  reminder1Sent Boolean  @default(false)
+  reminder2Sent Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  @@index([date])
+  @@index([patientId])
+}
+
+model WhatsAppMessage {
+  id          String   @id @default(cuid())
+  patientId   String
+  patient     Patient  @relation(fields: [patientId], references: [id])
+  direction   String
+  content     String
+  mediaUrl    String?
+  status      String   @default("SENT")
+  sentAt      DateTime @default(now())
+  readAt      DateTime?
+  templateKey String?
+
+  @@index([patientId])
+  @@index([sentAt])
+}
+
+model FinancialRecord {
+  id          String   @id @default(cuid())
+  patientId   String?
+  patient     Patient? @relation(fields: [patientId], references: [id])
+  type        String
+  category    String
+  amount      Float
+  status      String
+  date        DateTime
+  description String?
+  createdAt   DateTime @default(now())
+}
+
+model Doctor {
+  id           String        @id @default(cuid())
+  name         String
+  crm          String
+  specialty    String
+  color        String        @default("#3B82F6")
+  createdAt    DateTime      @default(now())
+  appointments Appointment[]
+}
+
+model AIInteraction {
+  id        String   @id @default(cuid())
+  patientId String?
+  type      String
+  prompt    String
+  response  String
+  tokens    Int?
+  createdAt DateTime @default(now())
+}
